@@ -89,9 +89,13 @@ const unsigned char jingleNotes[] = {
                                 // (the upper-left "ghost"). y = 224 is the only value that
                                 // satisfies both for our 32x32 player/enemy sprites.
 #define PLAYFIELD_TOP 24        // top 3 tile-rows (y 0..23) are the stats bar
+#define PLAYFIELD_BOTTOM (224 - PLAYFIELD_TOP)  // 200 -- mirror of PLAYFIELD_TOP: bottom
+                                 // 3 tile-rows, reserved for the stats bar in upside-down mode
+#define HUD_ROW_TOP    1        // stats-bar text row in normal play (topmost fully-visible row)
+#define HUD_ROW_BOTTOM 26       // stats-bar text row in upside-down play (bottommost fully-visible row)
 #define SCORE_PER_KILL 100
 #define TANK_SCORE    300       // a 3-hit TAC-2 joystick is worth triple a console
-#define WIN_SCORE     5000	// score that triggers the "game completed" screen;
+#define WIN_SCORE     5000	    // score that triggers the "game completed" screen;
                                  // tune this down (e.g. 200) to reach it quickly for debugging
 #define TANK_HEALTH   3         // hits to destroy the tough enemy
 #define TANK_CHANCE   5         // ~1 in this many spawns is a tough enemy
@@ -115,7 +119,24 @@ const unsigned char jingleNotes[] = {
 // to a single whole-number gap -- marginally smoother for the same overall pace.
 #define CREDITS_SCROLL_SPEED 51        // 1/256ths of a px per frame (~1px every 5 frames)
 #define CREDITS_START_DELAY_FRAMES 90  // blank pause after the screen clears, before text appears
-#define WIN_PAUSE_FRAMES     30        // brief freeze right after the winning kill
+// spcPlaySound() doesn't send the gunshot sample in one go: it only flags a
+// transfer, and spcProcess() then feeds the SPC700 a chunk per frame over the
+// ~40-50 frames the ~3KB sample takes to stream across the four APU I/O ports.
+// pvsneslib gives no way to ask whether that stream has finished, and starting
+// a module load mid-stream talks over the very same ports the stream handshake
+// uses: the sound driver desyncs, and since every pvsneslib wait on those ports
+// spins with no timeout, the game hangs -- sometimes at the transition itself,
+// sometimes minutes into the next round when the corrupted driver finally
+// chokes on a command. So before any spcLoad we keep calling spcProcess for
+// comfortably longer than a full gunshot playback, guaranteeing the ports are
+// quiet. The winning kill is usually scored by a just-fired shot, so a stream
+// being mid-flight when the win sequence starts is the common case, not the
+// rare one.
+#define STREAM_SETTLE_FRAMES 60        // ~1s: > the ~50 frames a full gunshot stream needs
+#define STREAM_REGION_PAGES  16        // SPC RAM reserved for streamed BRR sfx (256b pages)
+#define WIN_PAUSE_FRAMES     60        // freeze right after the winning kill; kept >=
+                                       // STREAM_SETTLE_FRAMES so it doubles as the settle
+                                       // window before the win music is loaded
 #define WIN_CONGRATS_FRAMES 300        // ~5s (60fps) the "CONGRATULATIONS" banner stays up
 #define WIN_PHASE_PAUSE     0          // frozen field, about to show the banner
 #define WIN_PHASE_CONGRATS  1          // "CONGRATULATIONS" banner is up
@@ -181,6 +202,14 @@ unsigned char activeEnemies = START_ENEMIES;  // how many enemies are live right
 unsigned short nextEnemyScore = ENEMIES_PER_LEVEL;  // score at which the next enemy joins
                                                     // (a running threshold -- avoids a
                                                     // per-frame divide)
+
+// --- Upside-down world ---
+// Toggled by pressing START during the win sequence (see the gameWon block):
+// mirrors the whole game vertically -- ship near the top, enemies climbing
+// from the bottom, stats bar flipped to the bottom row too. Persists across
+// resetGame() calls (game-over and win-skip alike) until toggled again.
+unsigned char upsideDown = 0;
+unsigned char hudRow = HUD_ROW_TOP;      // stats-bar text row; flips with upsideDown
 
 // --- Score ---
 unsigned short score = 0;
@@ -255,15 +284,28 @@ void setEnemyAppearance(unsigned char i)
     oamSetEx(OAM_ENEMY(i), OBJ_LARGE, OBJ_SHOW);
 }
 
-// (Re)spawn an enemy above the top of the screen at a random column/speed.
-// Roughly 1 in TANK_CHANCE is a tough TAC-2 joystick: 3 hits to kill, and it
-// descends more slowly to offset the extra effort it takes to destroy.
+// True while an enemy is still (or again) behind the stats bar and should stay
+// hidden: normally that's the top band (y < PLAYFIELD_TOP); in upside-down
+// mode the bar is at the bottom, so it's whichever enemy has its trailing
+// edge still inside the bottom band (y + ENEMY_SIZE > PLAYFIELD_BOTTOM).
+unsigned char enemyBehindHud(short ey)
+{
+    return upsideDown ? (ey + ENEMY_SIZE > PLAYFIELD_BOTTOM) : (ey < PLAYFIELD_TOP);
+}
+
+// (Re)spawn an enemy at the spawn edge (top normally, bottom in upside-down
+// mode) at a random column/speed. Roughly 1 in TANK_CHANCE is a tough TAC-2
+// joystick: 3 hits to kill, and it moves more slowly to offset the extra
+// effort it takes to destroy.
 void spawnEnemy(unsigned char i)
 {
     short nx = (short)(rnd() & 0xFF);
     if (nx > SCREEN_W - ENEMY_SIZE) nx -= ENEMY_SIZE;   // keep fully on-screen (0..224)
     enemyX[i]     = nx;
-    enemyY[i]     = -ENEMY_SIZE - (short)(rnd() & 0x7F); // staggered above the screen
+    // Staggered off-screen on the spawn edge: above the screen normally, or
+    // below it in upside-down mode (where enemies climb up toward the ship).
+    enemyY[i]     = upsideDown ? (short)(224 + (rnd() & 0x7F))
+                                : (short)(-ENEMY_SIZE - (rnd() & 0x7F));
     enemyFrac[i]  = 0;
     enemyFlash[i] = 0;
     enemyHurt[i]  = 0;
@@ -312,7 +354,8 @@ void buildStarfield(void)
 void spawnPowerup(short sx, short sy)
 {
     if (powerupActive) return;
-    if (sy < PLAYFIELD_TOP) sy = PLAYFIELD_TOP;
+    if (upsideDown) { if (sy > PLAYFIELD_BOTTOM - POWERUP_SIZE) sy = PLAYFIELD_BOTTOM - POWERUP_SIZE; }
+    else            { if (sy < PLAYFIELD_TOP) sy = PLAYFIELD_TOP; }
     powerupX = sx;
     powerupY = sy;
     powerupActive = 1;
@@ -320,13 +363,21 @@ void spawnPowerup(short sx, short sy)
 
 // Destroy an enemy: start the death animation, score it, and maybe drop a bomb.
 // A no-op if it's already dying. Tougher TAC-2 joysticks are worth more points.
-void killEnemy(unsigned char i)
+// Returns 1 if this call actually killed something, 0 if it was a no-op.
+//
+// playSound is 0 only for the Y-bomb's mass kill below: the SPC700 sound
+// driver's command queue has no overflow protection, and its APU handshake
+// waits spin with no timeout -- queuing up to MAX_ENEMIES near-simultaneous
+// spcEffect() calls in one frame (e.g. a late-game bomb with a full board)
+// can desync it and hang the whole game. The bomb instead plays one
+// sfxEnemyHit() for the whole blast.
+unsigned char killEnemy(unsigned char i, unsigned char playSound)
 {
     if (enemyFlash[i] == 0)
     {
         enemyFlash[i] = FLASH_FRAMES;
         score += (enemyType[i] == ENEMY_TANK) ? TANK_SCORE : SCORE_PER_KILL;
-        sfxEnemyHit();
+        if (playSound) sfxEnemyHit();
 
         // Roughly every ~10 kills, drop a bomb power-up where this enemy died.
         if (++killsSinceDrop >= dropThreshold && !powerupActive)
@@ -335,7 +386,9 @@ void killEnemy(unsigned char i)
             killsSinceDrop = 0;
             dropThreshold  = 8 + (rnd() % 5);    // 8..12 kills until the next one
         }
+        return 1;
     }
+    return 0;
 }
 
 // Apply one bullet's worth of damage to an enemy. A normal console dies in one
@@ -351,7 +404,7 @@ void damageEnemy(unsigned char i)
         sfxTankHit();
         return;
     }
-    killEnemy(i);
+    killEnemy(i, 1);
 }
 
 // Fire a bullet from the player's top-centre, if a slot is free.
@@ -364,7 +417,8 @@ void fireBullet(short px, short py)
         {
             bulletActive[j] = 1;
             bulletX[j] = px + (PLAYER_SIZE / 2) - (BULLET_SIZE / 2);
-            bulletY[j] = py - BULLET_SIZE;
+            // Muzzle sits on whichever edge faces the oncoming enemies.
+            bulletY[j] = upsideDown ? (py + PLAYER_SIZE) : (py - BULLET_SIZE);
             return;
         }
     }
@@ -376,7 +430,7 @@ void drawScore(void)
     if (score == lastScore) return;
     lastScore = score;
     sprintf(scoreStr, "%05u", score);
-    consoleDrawText(7, 1, scoreStr);
+    consoleDrawText(7, hudRow, scoreStr);
 }
 
 // Lose SCORE_PER_KILL points (the value an un-hit kill would have earned), clamped at 0.
@@ -392,7 +446,7 @@ void drawLives(void)
     if (lives == lastLives) return;
     lastLives = lives;
     sprintf(livesStr, "%u", (unsigned short)lives);   // promote: 816-tcc won't widen char varargs
-    consoleDrawText(19, 1, livesStr);
+    consoleDrawText(19, hudRow, livesStr);
 }
 
 // Redraw the bomb count in the stats bar, only when it changed.
@@ -401,7 +455,7 @@ void drawBombs(void)
     if (bombs == lastBombs) return;
     lastBombs = bombs;
     sprintf(bombStr, "%u", (unsigned short)bombs);
-    consoleDrawText(27, 1, bombStr);
+    consoleDrawText(27, hudRow, bombStr);
 }
 
 // --- "Game completed" credits crawl -------------------------------------------
@@ -471,7 +525,10 @@ void resetGame(short *px, short *py)
     playerFlash = 0;
     powerupActive = 0;
     killsSinceDrop = 0;   dropThreshold = 10;
-    *px = 112; *py = 170;                       // player back at the start
+    // Mirrored near the top; kept even (like the normal-mode 170) so the -=2
+    // per-frame step lands exactly on the y>0 clamp below instead of
+    // overshooting to -1, which would wrap the 8-bit sprite Y to the bottom.
+    *px = 112; *py = upsideDown ? 32 : 170;
     activeEnemies = START_ENEMIES;              // back to the gentle opening wave
     nextEnemyScore = ENEMIES_PER_LEVEL;         // reset the difficulty ramp
     for (i = 0; i < MAX_ENEMIES; i++)
@@ -546,7 +603,7 @@ int main(void)
     spcSetBank(&SOUNDBANK__);
     // Reserve SPC RAM for BRR sound effects (gunshot is ~12 256-byte blocks);
     // do this before loading any sounds, as in the PVSnesLib likemario sample.
-    spcAllocateSoundRegion(16);
+    spcAllocateSoundRegion(STREAM_REGION_PAGES);
     spcStop();
     spcLoad(MOD_SFX);                              // effects bank (soundbank module 0)
     for (i = 0; i < NUM_SFX; i++) spcLoadEffect(i);
@@ -581,9 +638,9 @@ int main(void)
     // --- Stats bar: top 3 rows (y 0..23), kept clear of gameplay ---
     // Row 0 lands in the overscan ZSNES crops, so the HUD sits on row 1 (the
     // topmost fully-visible row).
-    consoleDrawText(1, 1, "SCORE");
-    consoleDrawText(13, 1, "LIVES");
-    consoleDrawText(21, 1, "BOMBS");
+    consoleDrawText(1, hudRow, "SCORE");
+    consoleDrawText(13, hudRow, "LIVES");
+    consoleDrawText(21, hudRow, "BOMBS");
     drawScore();
     drawLives();
     drawBombs();
@@ -647,10 +704,11 @@ int main(void)
         pad0  = padsCurrent(0);
         down0 = padsDown(0);
 
-        // --- Starfield: scroll the whole BG2 layer down one notch. Done here,
+        // --- Starfield: scroll the whole BG2 layer one notch. Done here,
         //     during the post-VBlank window, so it stays tear-free, and before
-        //     the game-over check so the sky keeps drifting while frozen. ---
-        starScroll -= STAR_SCROLL_PX;
+        //     the game-over check so the sky keeps drifting while frozen.
+        //     Upside-down mode reverses the drift so the sky falls "up" too. ---
+        starScroll += upsideDown ? STAR_SCROLL_PX : -STAR_SCROLL_PX;
         bgSetScroll(2, 0, starScroll);
 
         // Out of lives: freeze the field (sprites hold their last positions)
@@ -675,20 +733,58 @@ int main(void)
         {
             if (down0 & KEY_START)
             {
+                // START can arrive as little as one frame after the winning
+                // shot was fired, so its gunshot sample may still be streaming
+                // to the SPC700 -- and the reload below must not touch the APU
+                // ports until it's done (see STREAM_SETTLE_FRAMES). Feed the
+                // stream to completion first.
+                for (i = 0; i < STREAM_SETTLE_FRAMES; i++)
+                {
+                    spcProcess();
+                    WaitForVBlank();
+                }
+
+                // Blank the HUD at its *current* row before flipping it. Normally
+                // the WIN_PHASE_CONGRATS->CREDITS transition below already does
+                // this, but START is checked first in this whole gameWon block,
+                // so pressing it early (during WIN_PHASE_PAUSE/CONGRATS) skips
+                // that transition entirely -- without this, the old row's
+                // labels+values are left behind, sitting inside the live
+                // playfield once the stats bar flips to the opposite edge (the
+                // "scoreboard renders wrong in upside-down mode" symptom).
+                consoleDrawText(1, hudRow, "     ");
+                consoleDrawText(7, hudRow, "     ");
+                consoleDrawText(13, hudRow, "     ");
+                consoleDrawText(19, hudRow, " ");
+                consoleDrawText(21, hudRow, "     ");
+                consoleDrawText(27, hudRow, " ");
+                clearPlayfield();                           // hide any still-visible sprites too
+
+                // Flip into (or back out of) the mirrored upside-down world:
+                // ship near the top, enemies climbing from the bottom, and
+                // the stats bar flipped to match -- see the upsideDown/hudRow
+                // comment near their declarations.
+                upsideDown = !upsideDown;
+                hudRow = upsideDown ? HUD_ROW_BOTTOM : HUD_ROW_TOP;
+
                 // Skip straight to a fresh round. Both erases are safe no-ops
                 // if that particular screen was never drawn in the first place.
                 consoleDrawText(8, 12, "               ");  // erase "CONGRATULATIONS"
                 eraseCredits();
                 creditsScroll = 0;
                 bgSetScroll(0, 0, 0);                       // BG0 back to its normal HUD position
-                consoleDrawText(1, 1, "SCORE");             // HUD labels were hidden for the crawl
-                consoleDrawText(13, 1, "LIVES");
-                consoleDrawText(21, 1, "BOMBS");
+                consoleDrawText(1, hudRow, "SCORE");        // HUD labels were hidden for the crawl
+                consoleDrawText(13, hudRow, "LIVES");
+                consoleDrawText(21, hudRow, "BOMBS");
                 bgSetEnable(2);                             // bring the starfield back
                 // Loading a module wipes SPC RAM, so switch back to the effects
                 // bank and re-register everything exactly as at startup: the
-                // effect instruments, then the raw gunshot BRR sample.
+                // stream-region reservation (whose driver command also stops the
+                // module and re-initialises the driver's streaming state -- a
+                // clean slate for the gunshot streams the next round will fire),
+                // then the effect instruments, then the raw gunshot BRR sample.
                 spcStop();
+                spcAllocateSoundRegion(STREAM_REGION_PAGES);
                 spcLoad(MOD_SFX);
                 for (i = 0; i < NUM_SFX; i++) spcLoadEffect(i);
                 spcSetSoundEntry(15, PAN_CENTER, 4,
@@ -722,12 +818,12 @@ int main(void)
                 else
                 {
                     consoleDrawText(8, 12, "               ");  // erase "CONGRATULATIONS"
-                    consoleDrawText(1, 1, "     ");   // hide the HUD so it doesn't scroll
-                    consoleDrawText(7, 1, "     ");   // with the credits (BG0 is shared)
-                    consoleDrawText(13, 1, "     ");
-                    consoleDrawText(19, 1, " ");
-                    consoleDrawText(21, 1, "     ");
-                    consoleDrawText(27, 1, " ");
+                    consoleDrawText(1, hudRow, "     ");   // hide the HUD so it doesn't scroll
+                    consoleDrawText(7, hudRow, "     ");   // with the credits (BG0 is shared)
+                    consoleDrawText(13, hudRow, "     ");
+                    consoleDrawText(19, hudRow, " ");
+                    consoleDrawText(21, hudRow, "     ");
+                    consoleDrawText(27, hudRow, " ");
                     clearPlayfield();
                     creditsScroll = 0;
                     creditsPause  = CREDITS_START_DELAY_FRAMES;
@@ -772,8 +868,18 @@ int main(void)
 
         if (pad0 & KEY_LEFT  && x > 0)                 x -= 2;
         if (pad0 & KEY_RIGHT && x < SCREEN_W - PLAYER_SIZE) x += 2;   // 256 - 21
-        if (pad0 & KEY_UP    && y > PLAYFIELD_TOP)      y -= 2;       // stay below stats bar
-        if (pad0 & KEY_DOWN  && y < 224 - PLAYER_SIZE)  y += 2;       // 224 - 21
+        if (upsideDown)
+        {
+            // Stats bar lives at the bottom here, so the reserved band is the
+            // low boundary instead of the high one -- otherwise same as below.
+            if (pad0 & KEY_UP    && y > 0)                              y -= 2;
+            if (pad0 & KEY_DOWN  && y < PLAYFIELD_BOTTOM - PLAYER_SIZE) y += 2;
+        }
+        else
+        {
+            if (pad0 & KEY_UP    && y > PLAYFIELD_TOP)      y -= 2;       // stay below stats bar
+            if (pad0 & KEY_DOWN  && y < 224 - PLAYER_SIZE)  y += 2;       // 224 - 21
+        }
 
         if (down0 & (KEY_A | KEY_B)) { fireBullet(x, y); sfxFire(); }
 
@@ -781,8 +887,13 @@ int main(void)
         // console at once. Does nothing when the player is out of bombs.
         if ((down0 & KEY_Y) && bombs > 0)
         {
+            // One detonation cue for the whole blast, not one per enemy killed
+            // (see killEnemy's playSound comment) -- avoids flooding the SPC700
+            // command queue when a bomb goes off with a full board of enemies.
+            unsigned char killedAny = 0;
             bombs--;
-            for (i = 0; i < activeEnemies; i++) killEnemy(i);   // a bomb flattens even tanks
+            for (i = 0; i < activeEnemies; i++) killedAny |= killEnemy(i, 0);  // a bomb flattens even tanks
+            if (killedAny) sfxEnemyHit();
         }
 
         // Draw the player; while flashing (recently hit) blink on/off every 4 frames.
@@ -794,13 +905,13 @@ int main(void)
         else
             oamSetXY(OAM_PLAYER, x, y);
 
-        // --- Move bullets up; deactivate once they leave the top edge ---
+        // --- Move bullets toward the enemies; deactivate once they leave the
+        //     stats-bar edge (top normally, bottom in upside-down mode) ---
         for (j = 0; j < NUM_BULLETS; j++)
         {
             if (bulletActive[j])
             {
-                bulletY[j] -= BULLET_SPEED;
-                if (bulletY[j] < PLAYFIELD_TOP) bulletActive[j] = 0;   // stop at the stats bar
+                if (upsideDown ? (bulletY[j] >= PLAYFIELD_BOTTOM) : (bulletY[j] < PLAYFIELD_TOP))
             }
         }
 
@@ -816,10 +927,11 @@ int main(void)
             nextEnemyScore += ENEMIES_PER_LEVEL;
         }
 
-        // --- Update enemies: flashing ones freeze then respawn, others descend ---
+        // --- Update enemies: flashing ones freeze then respawn, others move
+        //     toward the ship (descend normally, ascend in upside-down mode) ---
         for (i = 0; i < activeEnemies; i++)
         {
-            if (enemyHurt[i] > 0) enemyHurt[i]--;         // chipped flicker fades (keeps descending)
+            if (enemyHurt[i] > 0) enemyHurt[i]--;         // chipped flicker fades (keeps moving)
             if (enemyFlash[i] > 0)
             {
                 enemyFlash[i]--;
@@ -827,11 +939,13 @@ int main(void)
             }
             else
             {
-                // Sub-pixel descent: accumulate 1/256ths, advance whole pixels.
+                // Sub-pixel movement: accumulate 1/256ths, advance whole pixels
+                // toward whichever edge is the escape side this mode.
                 unsigned short acc = enemyFrac[i] + (unsigned short)enemySpeed[i];
-                enemyY[i]   += (short)(acc >> 8);
+                short delta = (short)(acc >> 8);
+                enemyY[i]   += upsideDown ? -delta : delta;
                 enemyFrac[i] = (unsigned char)(acc & 0xFF);
-                if (enemyY[i] >= 224)        // escaped un-hit off the bottom
+                if (upsideDown ? (enemyY[i] <= -ENEMY_SIZE) : (enemyY[i] >= 224))  // escaped un-hit
                 {
                     penalizeScore();
                     spawnEnemy(i);
@@ -878,7 +992,7 @@ int main(void)
         {
             for (i = 0; i < activeEnemies; i++)
             {
-                if (enemyFlash[i] > 0 || enemyY[i] < PLAYFIELD_TOP) continue;  // not a live target
+                if (enemyFlash[i] > 0 || enemyBehindHud(enemyY[i])) continue;  // not a live target
                 if (x + PLAYER_SIZE > enemyX[i] &&
                     x < enemyX[i] + ENEMY_SIZE &&
                     y + PLAYER_SIZE > enemyY[i] &&
@@ -903,12 +1017,12 @@ int main(void)
             }
         }
 
-        // --- Bomb power-up: fall, get caught by the player, or drop off the bottom ---
+        // --- Bomb power-up: drift toward the ship, get caught, or drift off-screen ---
         if (powerupActive)
         {
-            powerupY += POWERUP_SPEED;
-            if (powerupY >= 224)
-                powerupActive = 0;                         // missed -- fell off-screen
+            powerupY += upsideDown ? -POWERUP_SPEED : POWERUP_SPEED;
+            if (upsideDown ? (powerupY <= -POWERUP_SIZE) : (powerupY >= 224))
+                powerupActive = 0;                         // missed -- drifted off-screen
             else if (x + PLAYER_SIZE > powerupX &&
                      x < powerupX + POWERUP_SIZE &&
                      y + PLAYER_SIZE > powerupY &&
@@ -923,9 +1037,9 @@ int main(void)
         // --- Draw enemies ---
         for (i = 0; i < activeEnemies; i++)
         {
-            // Hidden while still above the stats bar (keeps the top row clear),
+            // Hidden while still behind the stats bar (keeps that row clear),
             // on the "off" beat of the death blink, or mid chipped-hit flicker.
-            if (enemyY[i] < PLAYFIELD_TOP ||
+            if (enemyBehindHud(enemyY[i]) ||
                 (enemyFlash[i] > 0 && ((enemyFlash[i] >> 1) & 1)) ||
                 (enemyHurt[i] > 0 && (enemyHurt[i] & 1)))
                 oamSetXY(OAM_ENEMY(i), 0, OFFSCREEN_Y);

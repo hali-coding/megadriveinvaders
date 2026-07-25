@@ -911,7 +911,9 @@ int main(void)
         {
             if (bulletActive[j])
             {
+                bulletY[j] += upsideDown ? BULLET_SPEED : -BULLET_SPEED;
                 if (upsideDown ? (bulletY[j] >= PLAYFIELD_BOTTOM) : (bulletY[j] < PLAYFIELD_TOP))
+                    bulletActive[j] = 0;   // stop at the stats bar
             }
         }
 

@@ -6,7 +6,7 @@ Small SNES homebrew project built with PVSnesLib. The game ROM is generated as `
 
 - C for game logic in `src/main.c`
 - PVSnesLib for the SNES SDK and build rules
-- GNU Make under a Linux or WSL shell
+- GNU Make on Linux or WSL (Ubuntu 24.04 or later)
 - PVSnesLib graphics conversion tools during `make`
 - Python helper scripts in `tools/` for regenerating source BMP art
 
@@ -21,7 +21,8 @@ Small SNES homebrew project built with PVSnesLib. The game ROM is generated as `
 
 ## Required Tools
 
-The build targets a Linux or WSL shell with GNU Make.
+The build targets Linux or WSL (Ubuntu 24.04 or later) with GNU Make. There is
+no native Windows build — on Windows, run the build inside WSL.
 
 ### 1. PVSnesLib
 
@@ -118,7 +119,7 @@ These generated files are already present in the repository, but they can be reg
 
 ## Helper Scripts
 
-The Python scripts in `tools/` are not part of the normal `make` target. They are helper utilities for regenerating the source BMP files before running the build. They share `tools/snesbmp.py` (a small standard-library helper that draws onto an indexed canvas and writes the 8bpp BMP), and they use only the Python standard library, so they run the same on Windows, Linux, and WSL.
+The Python scripts in `tools/` are not part of the normal `make` target. They are helper utilities for regenerating the source BMP files before running the build. They share `tools/snesbmp.py` (a small standard-library helper that draws onto an indexed canvas and writes the 8bpp BMP), and they use only the Python standard library, so they run the same on Linux and WSL.
 
 ### `tools/make_player_bmp.py`
 

@@ -13,6 +13,7 @@ Small SNES homebrew project built with PVSnesLib. The game ROM is generated as `
 ## Project Layout
 
 - `src/main.c`: main game code
+- `enemies.asm`: the per-enemy inner loops (movement, drawing, collision search) in hand-written 65816 assembly, called from `main.c`; the game logic stays in C
 - `Makefile`: build rules and graphics conversion steps
 - `tools/`: helper scripts to regenerate some sprite BMP assets
 - `*.bmp` / `pvsneslibfont.png`: authored source graphics used by the build
@@ -104,6 +105,9 @@ This project keeps source art in standard image formats and converts them during
 - `enemy.bmp`: enemy sprite sheet (Genesis console; one hit to destroy)
 - `tac2.bmp`: tough enemy sprite (TAC-2 joystick; takes three hits to destroy)
 - `bullet.bmp`: bullet sprite
+- `deepspace.bmp`: far parallax layer (faint planets, nebula, galaxy, dim stars)
+- `nearstars.bmp`: near parallax layer (bright, twinkling stars)
+- `skygrad.bmp` / `skygrad_flip.bmp`: backdrop colour gradient, converted to HDMA tables
 - `pvsneslibfont.png`: font image
 
 ### Generated outputs
@@ -167,6 +171,20 @@ Run it with:
 
 ```sh
 python3 tools/make_bullet_bmp.py
+```
+
+### `tools/make_space_bmp.py`
+
+- Generates the scrolling space backdrop: `deepspace.bmp`, `nearstars.bmp`, `skygrad.bmp` and `skygrad_flip.bmp`
+- `deepspace.bmp` (256x512, 2bpp, BG2) holds faint, dithered planets (a ringed gas giant and its moon, a teal crescent world, a rusty dwarf), a comet, a nebula, a distant spiral galaxy and dim far stars; it scrolls at a quarter of the near layer's speed
+- `nearstars.bmp` (256x512, 4bpp, BG1) holds the brighter near stars, including sparkles whose colours the game palette-cycles to twinkle
+- `skygrad*.bmp` are one-colour-per-scanline gradients that `gfx4snes -n` turns into HDMA tables for the backdrop colour (normal and upside-down)
+- Palette indices are the final CGRAM entries, and the script checks that every 8x8 tile draws from a single sub-palette; the layout is seeded, so re-running reproduces the same art
+
+Run it with:
+
+```sh
+python3 tools/make_space_bmp.py
 ```
 
 After running any of these scripts, rebuild the project so the `.bmp` changes are converted into SNES asset data.

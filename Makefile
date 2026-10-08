@@ -88,7 +88,30 @@ tac2.pic: tac2.bmp
 	@echo convert tac2 ... $(notdir $@)
 	$(GFXCONV) -s 32 -o 16 -u 16 -t bmp -i $<
 
-bitmaps: pvsneslibfont.pic sprites.pic enemy.pic bullet.pic powerup.pic tac2.pic
+# Parallax space backdrop. The source BMPs are produced by
+# tools/make_space_bmp.py -- regenerate them with `python3 tools/make_space_bmp.py`
+# when tweaking the art. Their palette indices are the final CGRAM entries.
+# Deep-space layer (BG2, 2bpp): -u 4 takes each tile's sub-palette from index // 4.
+deepspace.pic: deepspace.bmp
+	@echo convert deep space ... $(notdir $@)
+	$(GFXCONV) -s 8 -o 32 -u 4 -p -m -t bmp -i $<
+
+# Near starfield (BG1, 4bpp, sub-palette 2 = indices 32..47)
+nearstars.pic: nearstars.bmp
+	@echo convert near stars ... $(notdir $@)
+	$(GFXCONV) -s 8 -o 48 -u 16 -p -m -t bmp -i $<
+
+# Backdrop gradient -> HDMA colour table, plus its upside-down twin
+skygrad_grad_data.as: skygrad.bmp
+	@echo make gradient list ... $(notdir $@)
+	$(GFXCONV) -n -t bmp -i $<
+
+skygrad_flip_grad_data.as: skygrad_flip.bmp
+	@echo make gradient list ... $(notdir $@)
+	$(GFXCONV) -n -t bmp -i $<
+
+bitmaps: pvsneslibfont.pic sprites.pic enemy.pic bullet.pic powerup.pic tac2.pic \
+         deepspace.pic nearstars.pic skygrad_grad_data.as skygrad_flip_grad_data.as
 
 #---------------------------------------------------------------------------------
 # Sound: music/effects bank (smconv) + gun-fire BRR sample (snesbrr)

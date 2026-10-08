@@ -70,6 +70,47 @@ tac2_palend:
 
 .ends
 
+; --- Parallax space backdrop (generated from deepspace.bmp / nearstars.bmp) ---
+.section ".rodeepspace" superfree
+
+deepspace_til:
+.incbin "deepspace.pic"
+deepspace_tilend:
+
+deepspace_map:
+.incbin "deepspace.map"
+deepspace_mapend:
+
+deepspace_pal:
+.incbin "deepspace.pal"
+deepspace_palend:
+
+.ends
+
+.section ".ronearstars" superfree
+
+nearstars_til:
+.incbin "nearstars.pic"
+nearstars_tilend:
+
+nearstars_map:
+.incbin "nearstars.map"
+nearstars_mapend:
+
+nearstars_pal:
+.incbin "nearstars.pal"
+nearstars_palend:
+
+.ends
+
+; --- Backdrop gradient HDMA tables (generated from skygrad*.bmp by gfx4snes -n) ---
+.section ".roskygrad" superfree
+
+.include "skygrad_grad_data.as"
+.include "skygrad_flip_grad_data.as"
+
+.ends
+
 ; --- Gun-fire sound effect (BRR sample, snesbrr-encoded from res/gunshot.wav) ---
 .section ".robrr" superfree
 

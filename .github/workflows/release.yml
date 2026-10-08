@@ -120,7 +120,7 @@ jobs:
         run: |
           set -euo pipefail
           make clean || true   # start from source; generated assets are not committed
-          make
+          ROMNAME=snesgame2 make
           test -f "${ROM_NAME}.sfc"
           ls -l "${ROM_NAME}.sfc"
 

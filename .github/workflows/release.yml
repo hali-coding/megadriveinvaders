@@ -30,7 +30,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PVSNESLIB_VERSION: "4.5.0"
+  PVSNESLIB_VERSION: "4.6.0"
   PVSNESLIB_ZIP: "pvsneslib_460_64b_linux_release.zip"
   ROM_NAME: "snesgame2"
 
